@@ -1,6 +1,6 @@
-# mysql-monitor.node
+# mysql-writers.node
 
-A node app to monitor the availabiliy of an (HA) mysql service.
+A node app to visualize the availabiliy and latency of an (HA) mysql service.
 
 Design:
 - a Node server which maintains a MySQL connection
