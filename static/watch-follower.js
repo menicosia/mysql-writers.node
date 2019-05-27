@@ -1,4 +1,4 @@
-// Watch mysql-writers client
+// mysql-writers client which reflects follower replication lag
 
 window.onload = init ;
 var meterWidth = 360 ;
@@ -19,8 +19,8 @@ function showReplicationStatus(response) {
 
     lastTS = Math.round(Date.parse(response["ts"])/1000) ;
     now = Math.round(Date.now()/1000) ;
-    console.log("Last timestamp: " + lastTS
-                + "Current Date: " + now) ;
+    console.debug("Last timestamp: " + lastTS
+                + " Current timestamp: " + now) ;
     timeDelta = (now - lastTS) ;
     drawMeter(followerState, 0, timeDelta) ;
 }

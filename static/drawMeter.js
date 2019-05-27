@@ -3,7 +3,7 @@
 // The content of the canvas is effectively two squares; one red, one green
 // The magnitude of the red is indicated by the argument
 // Provide an id (ie, an index) to uniquely name the elements
-module.exports.drawMeter(element, id, magnitude) {
+function drawMeter(element, id, magnitude) {
     var canvas = null ;
     var context = null ;
     var canvasID = "meterCanvas" + id ;
