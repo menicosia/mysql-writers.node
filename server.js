@@ -1,12 +1,17 @@
 // Mysql Writers - an app to send transactions to a MySQL database,
 //    and record how long they take to commit.
 
+"use strict" ;
+
+var requestParts = undefined ;
 var finalhandler = require('finalhandler') ;
 var http = require('http') ;
 var serveStatic = require('serve-static') ;
 var strftime = require('strftime') ;
 var time = require('time') ;
 var url = require('url') ;
+var bindMySQL = require('./bind-mysql.js') ;
+var bindRedis = require('./bind-redis.js') ;
 var mysql = require('mysql') ;
 var redis = require('redis') ;
 var util = require('util') ;
@@ -15,14 +20,12 @@ var util = require('util') ;
 // var numSecondsStore = 600 // Default 10 minutes
 
 // Variables
-var data = "" ;
 var myIndex = 0 ;
 var port = 8080 ;
 var activateState = Boolean(false) ;
-var localMode = Boolean(false) ;
-var pm_uri = undefined ;
-var vcap_services = undefined ;
-var pm_credentials = undefined ;
+var readOnly = Boolean(false) ;
+var writerTimeout = undefined ; 
+var mysql_creds = undefined ;
 var dbClient = undefined ;
 var reportTimer = undefined ;
 var dbConnectState = Boolean(false) ;
@@ -43,72 +46,23 @@ var lastTxnSuccess = 0 ;
 // Future improvement:
 // Instance_X_List - A 600-int list to represent # of txns 10-min history
 
-var redis_credentials = undefined ;
-var redis_host = undefined ;
+var redis_creds = undefined ;
 var redisClient = undefined ;
 var redisConnectionState = Boolean(false) ;
 
 // Setup based on Environment Variables
-if (process.env.VCAP_SERVICES) {
-    vcap_services = JSON.parse(process.env.VCAP_SERVICES) ;
-    if (vcap_services['p-mysql']) {
-        pm_uri = vcap_services["p-mysql"][0]["credentials"]["uri"] ;
-        console.log("Got access p-mysql credentials: " + pm_uri) ;
-        activateState=true ;
-    } else if (vcap_services['dedicated-pivotal-mysql']) {
-        pm_uri = vcap_services["dedicated-pivotal-mysql"][0]["credentials"]["uri"] ;
-        console.log("Got access dedicated-pivotal-mysql credentials: " + pm_uri) ;
-        activateState=true ;
-    } else if (vcap_services['cleardb']) {
-        pm_uri = vcap_services["cleardb"][0]["credentials"]["uri"];
-        console.log("Got access to cleardb credentials: " + pm_uri) ;
-        activateState=true;
-    } else {
-        console.log("No VCAP_SERVICES mysql bindings. Will attempt to connect via 'MYSQL_URI'")
-    }
-    if (vcap_services['redis']) {
-        redis_credentials = vcap_services["redis"][0]["credentials"] ;
-        console.log("Got access credentials to redis: " + redis_credentials["host"]
-                 + ":" + redis_credentials["port"]) ;
-    } else if (vcap_services['rediscloud']) {
-        redis_credentials = vcap_services["rediscloud"][0]["credentials"] ;
-        console.log("Got access credentials to redis: " + redis_credentials["hostname"]
-                 + ":" + redis_credentials["port"]) ;
-    } else if (vcap_services['p-redis']) {
-        redis_credentials = vcap_services["p-redis"][0]["credentials"] ;
-        console.log("Got access credentials to p-redis: " + redis_credentials["host"]
-                 + ":" + redis_credentials["port"]) ;
-    } else {
-        console.log("No VCAP_SERVICES redis bindings. Will attempt to connect via 'REDIS_CREDS'")
-    }
+if ("VCAP_SERVICES" in process.env) {
 }
 
-if (process.env.VCAP_APP_PORT) { port = process.env.VCAP_APP_PORT ;}
+if (process.env.VCAP_APP_PORT) { var port = process.env.VCAP_APP_PORT ;}
+else { var port = 8080 ; }
+mysql_creds = bindMySQL.getMySQLCreds() ;
+redis_creds = bindRedis.getRedisCreds() ;
+if (mysql_creds && redis_creds) {
+    activateState = Boolean(true) ;
+}
 
 if (process.env.CF_INSTANCE_INDEX) { myIndex = JSON.parse(process.env.CF_INSTANCE_INDEX) ; }
-else {
-    console.log("CF not detected, attempting to run in local mode.") ;
-    localMode = true ;
-    if (process.env.MYSQL_URI) {
-        pm_uri = process.env.MYSQL_URI ;
-    } else {
-        pm_uri = "mysql://root@localhost:3306/default?reconnect=true" ;
-    }
-    activateState = true ;
-    if (process.env.REDIS_CREDS) {
-        creds = process.env.REDIS_CREDS.split(":") ;
-        if (3 != creds.length) {
-            console.error("[ERROR] REDIS_CREDS environment variable must be colon separated host:port:password") ;
-            process.exit(1) ;
-        } else {
-            redis_credentials = { 'password' : creds[2], 'host' : creds[0], 'port' : creds[1] } ;
-        }
-    } else {
-        redis_credentials = { 'password' : '', 'host' : '127.0.0.1', 'port' : '6379' } ;
-    }
-    console.log("MySQL URI: " + pm_uri) ;
-    myIndex = 0 ;
-}
 
 // Here lie the names of the Redis data structures that we'll read/write from
 var myInstance = "Instance_" + myIndex + "_Hash" ;
@@ -223,53 +177,67 @@ function recordTransactions() {
 function handleWriteRequest(error, results, fields) {
     if (error) {
         console.error("[ERROR] Failed writing to DB: %s", error) ;
-        process.exit(50) ;
     } else {
         numTxns++ ;
         lastTxnSuccess = time.time() ;
-        // Why call doTransaction() from handleWriteRequest, rather
-        // than an infinite loop in doTransaction itself?  Because I
-        // believe this is a better way of serializing; I don't want
-        // doTransaction to spew transactions without backpressure. I
-        // want it to issue one transaction at a time.
-        writerTimeout = setTimeout(doTransaction, 100) ; // Hopefully this doesn't build lots of entries in the stack?
     }
+    // Why call doTransaction() from handleWriteRequest, rather
+    // than an infinite loop in doTransaction itself?  Because I
+    // believe this is a better way of serializing; I don't want
+    // doTransaction to spew transactions without backpressure. I
+    // want it to issue one transaction at a time.
+    writerTimeout = setTimeout(doTransaction, 100) ; // Hopefully this doesn't build lots of entries in the stack?
 }
 
 function doTransaction() {
-    if (activateState && dbConnectState) {
-        var sql = "insert into " + myDataTable + " VALUES (NOW(), NULL)" ;
-        dbClient.query(sql, function (error, results, fields) {
-            handleWriteRequest(error, results, fields) ;
-        }) ;
-    } else {
-        console.log("[WARNING] Cannot write, DB not ready.")
+    if (! readOnly) {
+        if (activateState && dbConnectState) {
+            var sql = "insert into " + myDataTable + " VALUES (NOW(), NULL)" ;
+            dbClient.query(sql, function (error, results, fields) {
+                handleWriteRequest(error, results, fields) ;
+            }) ;
+        } else {
+            console.log("[WARNING] doTransaction - activate state false. Retrying in 1s.")
+            writerTimeout = setTimeout(doTransaction, 1000) ;
+        }
     }
 }
 
-function MySQLConnect() {
-    if (activateState) {
-        dbClient = mysql.createConnection(pm_uri)
-        dbClient.connect(handleDBConnect) ;
+function MySQLConnect(response) {
+    if (activateState && mysql_creds) {
+        console.log("Connecting to MySQL: " + mysql_creds["host"]) ;
+        var clientConfig = {
+            host : mysql_creds["host"],
+            user : mysql_creds["user"],
+            password : mysql_creds["password"],
+            port : mysql_creds["port"],
+            database : mysql_creds["database"]
+        } ;
+        if (mysql_creds["ca_certificate"]) {
+            console.log("CA Cert detected; using TLS");
+            clientConfig["ssl"] = { ca : mysql_creds["ca_certificate"] } ;
+        }
+        dbClient = mysql.createConnection( clientConfig ) ;
+        dbClient.connect(function (err, results, fields) {
+            handleDBConnect(err, response)
+        }) ;
         dbClient.on('error', handleDBConnect) ;
     } else {
-        console.error("[INTERNAL ERROR] MySQLConnect called, but activate-state is false") ;
+        console.error("[WARN] MySQLConnect - activate state is false") ;
         dbClient = undefined ;
     }
 }
 
 function RedisConnect() {
-    if (activateState && redis_credentials) {
-        console.log("Attempting to connect to redis...") ;
-        if (redis_credentials["host"]) {
-          redisClient = redis.createClient(redis_credentials["port"], redis_credentials["host"]) ;
-        } else {
-          redisClient = redis.createClient(redis_credentials["port"], redis_credentials["hostname"]) ;
-        }
-        if (! localMode) { redisClient.auth(redis_credentials["password"]) ; }
+    if (activateState && redis_creds) {
+        console.log("Connecting to Redis: " + redis_creds["host"]) ;
+        redisClient = redis.createClient(redis_creds["port"],
+                                         redis_creds["host"]) ;
+        redisClient.auth(redis_creds["password"]) ;
         redisClient.on("error", function(err) { handleRedisConnect("error", err) }) ;
         redisClient.on("ready", function(err) { handleRedisConnect("ready", undefined) }) ;
     } else {
+        console.log("[WARN] RedisConnect - activate state is false.") ;
         redisClient = undefined ;
         redisConnectionState = false ;
     }
@@ -292,40 +260,67 @@ function instanceInfo(req, res, instance) {
             }
         } ) ;
     } else {
-        err = "[ERROR] got request for instance info, redis not ready." ;
+        var err = "[ERROR] got request for instance info, redis not ready." ;
         console.error(err) ;
         res.end(err) ;
+    }
+}
+
+function handleReplicationTS(error, results, fields, response) {
+    if (error) {
+        console.error("[ERROR] failed to read replication status") ;
+    } else {
+        console.log("Got replication status: " + JSON.stringify(results[0])) ;
+        response.end(JSON.stringify(results[0])) ;
+    }
+}
+
+function followerStatus(response) {
+    if (activateState && dbConnectState) {
+        var sql = "select ts from replication_monitoring.heartbeat LIMIT 1" ;
+        dbClient.query(sql, function(error, results, fields) {
+            handleReplicationTS(error, results, fields, response) ;
+        }) ;
+    } else {
+        str = "[followerStatus] Sorry cannot complete request." ;
+        console.log(str) ;
+        response.end(JSON.stringify(str)) ;
     }
 }
 
 function dispatchApi(request, response, method, query) {
     switch(method) {
     case "instanceInfo":
-        desired_instance = "Instance_" + Object.keys(query)[0] + "_Hash" ;
+        var desired_instance = "Instance_" + Object.keys(query)[0] + "_Hash";
         console.log("[dispatchApi] instanceInfo on: " + desired_instance) ;
         instanceInfo(request, response, desired_instance) ;
+        break ;
+    case "followerStatus":
+        console.log("[dispatchApi] followerStatus") ;
+        followerStatus(response) ;
         break ;
     }
 }
 
 function requestHandler(request, response) {
-    data = "" ;
-    requestParts = url.parse(request.url, true);
-    rootCall = requestParts['pathname'].split('/')[1] ;
+    var data = "" ;
+    var requestParts = url.parse(request.url, true);
+    var rootCall = requestParts['pathname'].split('/')[1] ;
     console.log("Recieved request for: " + rootCall) ;
     switch (rootCall) {
     case "env":
-	      if (process.env) {
-	          data += "<p>" ;
-		        for (v in process.env) {
-		            data += v + "=" + process.env[v] + "<br>\n" ;
-		        }
-		        data += "<br>\n" ;
-	      } else {
-		        data += "<p> No process env? <br>\n" ;
-	      }
+        var v ;
+	if (process.env) {
+	    data += "<p>" ;
+	    for (v in process.env) {
+		data += v + "=" + process.env[v] + "<br>\n" ;
+	    }
+	    data += "<br>\n" ;
+	} else {
+	    data += "<p> No process env? <br>\n" ;
+	}
         response.write(data) ;
-	      break ;
+	break ;
     case "json":
         var method = requestParts['pathname'].split('/')[2] ;
         dispatchApi(request, response, method, requestParts['query']) ;
@@ -340,14 +335,34 @@ function requestHandler(request, response) {
         data += "<h1>MySQL Wwriter</h1>\n" ;
         data += "<p>" + strftime("%Y-%m-%d %H:%M") + "<br>\n" ;
         data += "<p>Request was: " + request.url + "<br>\n" ;
-        if (activateState) {
-	          data += "Database connection info: " + pm_uri + "<br>\n" ;
-        } else {
-            data += "Database info is NOT SET</br>\n" ;
-        }
         data += "</p\n<hr>\n" ;
         data += "<A HREF=\"" + url.resolve(request.url, "env") + "\">/env</A>  " ;
         response.write(data) ;
+        break ;
+    case "useDB":
+        if ("query" in requestParts
+            && "host" in requestParts["query"] && "db" in requestParts["query"]
+            && "user" in requestParts["query"] && "pw" in requestParts["query"]) {
+            console.log("Received DB connection info: " + requestParts["query"]["host"]) ;
+            mysql_creds["host"] = requestParts["query"]["host"] ;
+            mysql_creds["database"] = requestParts["query"]["db"] ;
+            mysql_creds["user"] = requestParts["query"]["user"] ;
+            mysql_creds["password"] = requestParts["query"]["pw"] ;
+            // mysql_creds["port"] = 3306 ;
+            if ("writeDB" in requestParts["query"]) {
+                console.debug("Value of checkbox writeDB is: "
+                              + mysql_creds["writeDB"]) ;
+                readOnly = Boolean(false) ;
+            } else {
+                console.log("Choosing read only mode.") ;
+                readOnly = Boolean(true) ;
+            }
+            activateState = Boolean(true) ;
+            MySQLConnect(response) ;
+        } else {
+            response.end("ERROR: Usage: /useDB?host=foo&db=bar&user=baz&pw=garply "
+                         + "(request: " + request.url  + ")\n") ;
+        }
         break ;
     default:
         console.log("Unknown request: " + request.url) ;
@@ -371,7 +386,7 @@ if (activateState) {
 }
 
 var staticServer = serveStatic("static") ;
-monitorServer = http.createServer(function(req, res) {
+var monitorServer = http.createServer(function(req, res) {
 var done = finalhandler(req, res) ;
     staticServer(req, res, function() { requestHandler(req, res, done) ; } ) ;
 }) ;

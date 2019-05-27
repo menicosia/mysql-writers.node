@@ -1,0 +1,21 @@
+<html>
+  <head>
+    <base href="/">
+    <title>Configure Writers</title>
+    <link rel="stylesheet" href="tables.css">
+  </head>
+  <body>
+    <h1>Configure Writers</h1>
+    <table id="configure">
+      <form action="useDB" method="get">
+        <tr><td>Host:</td><td><input type="text" name="host" /></td></tr>
+        <tr><td>Database:</td><td><input type="text" name="db" /></td></tr>
+        <tr><td>User name:</td><td><input type="text" name="user" /></td></tr>
+        <tr><td>Password:</td><td><input type="password" name="pw" /></td></tr>
+        <tr><td>Write to DB?</td><td>
+                              <input type="checkbox" id="writeDB" name="writeDB" checked></td></tr>
+        <tr><td></td><td><button type="submit">Go</button></td></tr>
+      </form>
+    </table>
+  </body>
+</html>

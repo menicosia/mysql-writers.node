@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+   <head>
+    <base href="/">
+    <title>Follower Lag Viewer</title>
+    <style type="text/css">
+      table {
+          width: 80%;
+      }
+      th, td {
+          padding: 5px;
+          text-align: left;
+      }
+      canvas {border: 1px solid black}
+    </style>
+    <script src="watch-follower.js"></script>
+    <script src="drawMeter.js"></script>
+  </head>
+  <body>
+    <H1>Follower Lag Viewer</H1>
+    <hr>
+    <p>Seconds since last transaction received from Leader: <br>
+      <center>
+        <span id="follower-state"></span>
+      </center>
+    </p>
+  </body>
+</html>
